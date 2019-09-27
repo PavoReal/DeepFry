@@ -1,6 +1,7 @@
 #include <stdio.h>
 #include <stdint.h>
 #include <assert.h>
+#include <math.h>
 #define SDL_MAIN_HANDLED
 
 #include "imgui.h"
@@ -13,11 +14,15 @@
 
 #define STB_IMAGE_IMPLEMENTATION
 #define STB_IMAGE_WRITE_IMPLEMENTATION
+#define STB_IMAGE_RESIZE_IMPLEMENTATION
 
 #include "stb_image.h"
 #include "stb_image_write.h"
+#include "stb_image_resize.h"
 
 #define UNUSED(a) (void) a
+#define MIN(a,b) ((a) < (b) ? (a) : (b))
+#define MAX(a,b) ((a) > (b) ? (a) : (b))
 
 typedef int8_t  s8;
 typedef int16_t s16;
@@ -30,6 +35,34 @@ typedef uint16_t u16;
 typedef uint32_t u32;
 typedef uint64_t u64;
 
+struct v3
+{
+    union
+    {
+        struct
+        {
+            u8 x;
+            u8 y;
+            u8 z;
+        };
+
+        struct
+        {
+            u8 r;
+            u8 g;
+            u8 b;
+        };
+    };
+};
+
+inline v3
+V3(u8 x, u8 y, u8 z)
+{
+    v3 result = {x, y, z};
+
+    return result;
+}
+
 inline GLuint
 GenGLTexture(int width, int height, u8 *data)
 {
@@ -38,15 +71,19 @@ GenGLTexture(int width, int height, u8 *data)
     glGenTextures(1, &result);
     glBindTexture(GL_TEXTURE_2D, result);
 
-    // Setup filtering parameters for display
     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
 
-    // Upload pixels into texture
     glPixelStorei(GL_UNPACK_ROW_LENGTH, 0);
     glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, width, height, 0, GL_RGBA, GL_UNSIGNED_BYTE, data);
 
     return result;
+}
+
+inline void
+DeleteGLTexture(GLuint id)
+{
+    glDeleteTextures(1, &id);
 }
 
 inline unsigned char*
@@ -59,21 +96,70 @@ LoadTextureFromFile(char* filename, GLuint *textureID, int *width, int *height)
         return 0;
     }
 
+    DeleteGLTexture(*textureID);
    *textureID = GenGLTexture(*width, *height, data);
 
     return data;
 }
 
-inline u8*
-DeepFry(unsigned char *input, int width, int height, int a, int b, int c, int d)
+struct DeepFryEffects
 {
-    u8* result = (u8*) malloc(width * height * 4);
+    v3 black;
+    v3 white;
+
+    int downSampleCount;
+    float downSampleMultiply;
+    int jpegQuality;
+};
+
+inline DeepFryEffects
+DefaultDeepFry()
+{
+    DeepFryEffects result = {};
+
+    result.black = V3(10, 10, 10);
+    result.white = V3(245, 245, 245);
+
+    result.downSampleCount    = 0;
+    result.downSampleMultiply = 0.5;
+
+    result.jpegQuality = 6;
+
+    return result;
+}
+
+struct JPEGWriteContext
+{
+    u8 *dest;
+};
+
+void 
+JPEGWriteToBuffer(void *context, void *data, int size)
+{
+    JPEGWriteContext *info = (JPEGWriteContext*) context;
+
+    u8 *dest = info->dest;
+    u8 *src  = (u8*) data;
+
+    for (int i = 0; i < size; ++i)
+    {
+        *dest++ = *src++;
+    }
+
+    info->dest = dest;
+}
+
+inline u8*
+DeepFry(unsigned char *input, int width, int height, DeepFryEffects *flags)
+{
+    size_t bufferSize = width *  height * 4;
+
+    u8* result    = (u8*) malloc((size_t) (bufferSize * 2.1));
+    u8* resizeBuf = result + bufferSize;
 
     u8 *srcIndex  = input;
     u8 *destIndex = result;
 
-    double avgLum   = 69;
-    double lumCount = 0;
     for (u64 i = 0; i < (width * height); ++i)
     {
         u8 red   = *srcIndex++;
@@ -81,18 +167,53 @@ DeepFry(unsigned char *input, int width, int height, int a, int b, int c, int d)
         u8 blue  = *srcIndex++;
         u8 alpha = *srcIndex++;
 
-        double lum = (red * 0.2126f) * (green * 0.7152f) * (blue * 0.0722f);
-        avgLum   += lum;
-        lumCount += 1;
+        bool isBlack = (red <= flags->black.r) && (green <= flags->black.g) && (blue <= flags->black.b);
+        bool isWhite = (red >= flags->white.r) && (green >= flags->white.g) && (blue >= flags->white.b);
 
-        double aa        = avgLum / lumCount;
-        double contrast = (aa - lum) / aa;
+        if (isBlack)
+        {
+            red   = 0x00;
+            green = 0x00;
+            blue  = 0x00;
+        }
+        else if (isWhite)
+        {
+            red   = 0xff;
+            green = 0xff;
+            blue  = 0xff;
+        }
 
-        *destIndex++ = (u8) (((red + blue) / 2) * contrast) & (u32) a; // Red
-        *destIndex++ = (u8) ((green + red)      * contrast) & (u32) b;   // Green
-        *destIndex++ = (u8) ((blue + green)     * contrast) & (u32) c;  // Blue
-        *destIndex++ = (u8) (alpha * contrast) & (u32) d; // Alpha
+        *destIndex++ = red;
+        *destIndex++ = green;
+        *destIndex++ = blue;
+        *destIndex++ = alpha;
     }
+
+    for (int i = 0; i < flags->downSampleCount; ++i)
+    {
+        stbir_resize_uint8(result, width, height, 0,
+                            resizeBuf,
+                            (int) (width * flags->downSampleMultiply), 
+                            (int) (height * flags->downSampleMultiply), 0, 4);
+
+        stbir_resize_uint8(resizeBuf, 
+            (int) (width * flags->downSampleMultiply), 
+            (int) (height * flags->downSampleMultiply), 
+            0, result, width, height, 0, 4);
+    }
+
+    JPEGWriteContext context;
+    context.dest = resizeBuf;
+
+    int w;
+    int h;
+
+    stbi_write_jpg_to_func(JPEGWriteToBuffer, &context, width, height, 4, result, flags->jpegQuality);
+    u8 *jpegImage = stbi_load_from_memory(resizeBuf, (int)(context.dest - resizeBuf), &w, &h, 0, 4);
+
+    memcpy(result, jpegImage, (width * height * 4));
+
+    stbi_image_free(jpegImage);
 
     return result;
 }
@@ -142,6 +263,7 @@ main()
     // Setup Dear ImGui style
     //ImGui::StyleColorsDark();
     ImGui::StyleColorsClassic();
+    ImGui::SetColorEditOptions(ImGuiColorEditFlags_Uint8 | ImGuiColorEditFlags_NoAlpha);
 
     // Setup Platform/Renderer bindings
     ImGui_ImplSDL2_InitForOpenGL(window, gl_context);
@@ -160,15 +282,7 @@ main()
     bool showError = false;
     bool showDest  = false;
 
-    bool eA = true; // Sports
-    bool eB = true;
-    bool eC = true;
-    bool eD = false;
-
-    int yA = INT_MAX / 4;
-    int yB = INT_MAX / 4; 
-    int yC = INT_MAX / 4;
-    int yD = INT_MAX / 4;
+    DeepFryEffects effects = DefaultDeepFry();
 
     GLuint destID = 0;
     u8 *destData = 0;
@@ -176,10 +290,19 @@ main()
 
     strcpy(srcImgName, "FILE NAME (WITH EXTENSION) HERE");
 
+#define FRAME_RATE 30
+#define TICKS_FOR_NEXT_FRAME (1000 / FRAME_RATE)
+
     // Main loop
     bool done = false;
+    int lastTime = 0;
     while (!done)
     {
+        while (lastTime - SDL_GetTicks() < TICKS_FOR_NEXT_FRAME) 
+        {
+            SDL_Delay(1);
+        }
+
         SDL_Event event;
         while (SDL_PollEvent(&event))
         {
@@ -200,104 +323,119 @@ main()
         ImGui_ImplSDL2_NewFrame(window);
         ImGui::NewFrame();
 
-        // 2. Show a simple window that we create ourselves. We use a Begin/End pair to created a named window.
-        {
-            ImGui::Begin("Source image");
+        // #if defined(DEBUG)
+        // ImGui::Begin("Deep fry info");
+        // ImGui::Text("Black point: \n\tR: %d\n\tG: %d\n\tB: %d", blackPoint.r, blackPoint.g, blackPoint.b);
+        // ImGui::End();
+        // #endif
 
-            if (showError)
+        // 2. Show a simple window that we create ourselves. We use a Begin/End pair to created a named window.
+        ImGui::Begin("Source image");
+
+        if (showError)
+        {
+            ImGui::Text("Could not load %s...", errorImgName);
+        }
+
+        ImGui::Text("Filename:");
+        ImGui::SameLine();
+        ImGui::InputText("", srcImgName, sizeof(srcImgName));
+        ImGui::SameLine();
+
+        if (ImGui::Button("Load"))
+        {
+            unsigned char *newSrcData = LoadTextureFromFile(srcImgName, &srcID, &srcWidth, &srcHeight);
+            
+            if (newSrcData)
             {
-                ImGui::Text("Could not load %s...", errorImgName);
+                showError = false;
+                showDest = true;
+                stbi_image_free(srcData);
+                free(destData);
+
+                srcData = newSrcData;
+                destData = DeepFry(srcData, srcWidth, srcHeight, &effects);
+
+                DeleteGLTexture(destID);
+                destID = GenGLTexture(srcWidth, srcHeight, destData);
+
+                sprintf(destImgName, "deepfried_%s.jpg", srcImgName);
             }
+            else
+            {
+                showError = true;
+                strcpy(errorImgName, srcImgName);
+            }
+        }
+
+        ImGui::SliderFloat("Image scale", &srcScale, 0.1f, 2.0f);
+        if (srcID)
+        {
+            ImGui::Image((void*)(intptr_t)srcID, ImVec2((float) srcWidth * srcScale, (float) srcHeight * srcScale));
+        }
+
+        ImGui::End();
+
+        if (showDest)
+        {
+            ImGui::Begin("Deep fryed image");
 
             ImGui::Text("Filename:");
             ImGui::SameLine();
-            ImGui::InputText("", srcImgName, sizeof(srcImgName));
-            ImGui::SameLine();
-
-            if (ImGui::Button("Load"))
+            ImGui::InputText("", destImgName, sizeof(destImgName));
+            if (ImGui::Button("Save"))
             {
-                unsigned char *newSrcData = LoadTextureFromFile(srcImgName, &srcID, &srcWidth, &srcHeight);
-                
-                if (newSrcData)
-                {
-                    showError = false;
-                    showDest = true;
-                    stbi_image_free(srcData);
-                    free(destData);
-
-                    srcData = newSrcData;
-                    destData = DeepFry(srcData, srcWidth, srcHeight, 
-                        (eA ? yA : ~0),
-                        (eB ? yB : ~0),
-                        (eC ? yC : ~0),
-                        (eD ? yD : ~0));
-
-                    destID = GenGLTexture(srcWidth, srcHeight, destData);
-
-                    sprintf(destImgName, "deepfried_%s.png", srcImgName);
-                }
-                else
-                {
-                    showError = true;
-                    strcpy(errorImgName, srcImgName);
-                }
+                stbi_write_jpg(destImgName, srcWidth, srcHeight, 4, destData, 50);
             }
 
-            ImGui::SliderFloat("Scale", &srcScale, 0.0f, 1.0f);
-            if (srcID)
+            bool shouldRedraw = false;
+
+            static float blackColors[3] = {};
+            if (ImGui::ColorEdit3("Black point", blackColors))
             {
-                ImGui::Image((void*)(intptr_t)srcID, ImVec2((float) srcWidth * srcScale, (float) srcHeight * srcScale));
+                shouldRedraw = true;
+                effects.black = V3(
+                    (u8) (blackColors[0] * 255), 
+                    (u8) (blackColors[1] * 255), 
+                    (u8) (blackColors[2] * 255));
+            }
+
+            static float whiteColors[3] = {1, 1, 1};
+            if (ImGui::ColorEdit3("White point", whiteColors))
+            {
+                shouldRedraw = true;
+                effects.white = V3(
+                    (u8) (whiteColors[0] * 255), 
+                    (u8) (whiteColors[1] * 255), 
+                    (u8) (whiteColors[2] * 255));
+            }
+
+            shouldRedraw |= ImGui::SliderInt("JPEG Quality", &effects.jpegQuality, 1, 100);
+
+            shouldRedraw |= ImGui::SliderFloat("Downsample multiply", &effects.downSampleMultiply, 0.01f, 0.5f);
+            shouldRedraw |= ImGui::SliderInt("Downsample iterations", &effects.downSampleCount, 0, 100);
+            ImGui::SameLine();
+            ImGui::Text("(Higher values will be very slow)");
+
+            if (shouldRedraw)
+            {
+                free(destData);
+                destData = DeepFry(srcData, srcWidth, srcHeight, &effects);
+
+                DeleteGLTexture(destID);
+                destID = GenGLTexture(srcWidth, srcHeight, destData);
+            }
+
+            ImGui::SliderFloat("Image scale", &destScale, 0.1f, 2.0f);
+            ImGui::SameLine();
+            ImGui::Text("(Viewport only)");
+
+            if (destID)
+            {
+                ImGui::Image((void*)(intptr_t)destID, ImVec2((float) srcWidth * destScale, (float) srcHeight * destScale));
             }
 
             ImGui::End();
-
-            if (showDest)
-            {
-                ImGui::Begin("Deep fryed image");
-
-                ImGui::Text("Filename:");
-                ImGui::SameLine();
-                ImGui::InputText("", destImgName, sizeof(destImgName));
-                if (ImGui::Button("Save"))
-                {
-                    stbi_write_png(destImgName, srcWidth, srcHeight, 4, destData, srcWidth * 4);
-                }
-
-                bool changeA = ImGui::SliderInt("Retarded red",   &yA,  0, INT_MAX / 2);
-                ImGui::SameLine();
-                ImGui::Checkbox("Enabled", &eA);
-
-                bool changeB = ImGui::SliderInt("Retarded green", &yB,  0, INT_MAX / 2);
-                ImGui::SameLine();
-                ImGui::Checkbox("Enabled", &eB);
-
-                bool changeC = ImGui::SliderInt("Retarded blue",  &yC,  0, INT_MAX / 2);
-                ImGui::SameLine();
-                ImGui::Checkbox("Enabled", &eC);
-
-                bool changeD = ImGui::SliderInt("Retarded alpha", &yD,  0, INT_MAX / 2);
-                ImGui::SameLine();
-                ImGui::Checkbox("Enabled", &eD);
-
-                if (changeA || changeB || changeC || changeD)
-                {
-                    free(destData);
-                    destData = DeepFry(srcData, srcWidth, srcHeight, 
-                        (eA ? yA : ~0),
-                        (eB ? yB : ~0),
-                        (eC ? yC : ~0),
-                        (eD ? yD : ~0));
-                    destID   = GenGLTexture(srcWidth, srcHeight, destData);
-                }
-
-                ImGui::SliderFloat("Scale", &destScale, 0.0f, 1.0f);
-                if (destID)
-                {
-                    ImGui::Image((void*)(intptr_t)destID, ImVec2((float) srcWidth * destScale, (float) srcHeight * destScale));
-                }
-
-                ImGui::End();
-            }
         }
 
         // Rendering
@@ -307,6 +445,7 @@ main()
         glClear(GL_COLOR_BUFFER_BIT);
         ImGui_ImplOpenGL3_RenderDrawData(ImGui::GetDrawData());
         SDL_GL_SwapWindow(window);
+        lastTime = SDL_GetTicks();
     }
 
     // Cleanup

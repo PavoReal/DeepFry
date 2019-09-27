@@ -9,7 +9,7 @@ set LIBRARIES=..\libs\SDL2\lib\x64\SDL2.lib ..\libs\SDL2\lib\x64\SDL2main.lib op
 set CPP_FLAGS_DEBUG=/Od /DDEBUG /Zi
 set CPP_FLAGS_REL=/O2 /Oi
 
-set CPP_FLAGS=/nologo /MD /diagnostics:column /D_CRT_SECURE_NO_WARNINGS /WL /GR- /EHa- /W4 /wd4996 /wd4706 %INCLUDE_DIRS% 
+set CPP_FLAGS=/nologo /MD /diagnostics:column /D_CRT_SECURE_NO_WARNINGS /WL /GR- /EHa- /W4 /wd4996 /wd4201 /wd4706 %INCLUDE_DIRS% 
 set LD_FLAGS=%LIBRARIES% 
 
 mkdir build 2> NUL

@@ -1,2 +1,5 @@
 build/
 *.*sublime*
+debug/
+nsight/
+*.rdbg
