@@ -107,6 +107,8 @@ struct DeepFryEffects
     v3 black;
     v3 white;
 
+    v3 colors;
+
     int downSampleCount;
     float downSampleMultiply;
     int jpegQuality;
@@ -119,6 +121,8 @@ DefaultDeepFry()
 
     result.black = V3(10, 10, 10);
     result.white = V3(245, 245, 245);
+
+    result.colors = V3(255, 255, 255);
 
     result.downSampleCount    = 0;
     result.downSampleMultiply = 0.5;
@@ -181,6 +185,27 @@ DeepFry(unsigned char *input, int width, int height, DeepFryEffects *flags)
             red   = 0xff;
             green = 0xff;
             blue  = 0xff;
+        }
+        else
+        {
+            bool isRed   = (red   >= flags->colors.r);
+            bool isGreen = (green >= flags->colors.g);
+            bool isBlue  = (blue  >= flags->colors.b);
+
+            if (isRed)
+            {
+                red = 0xff;
+            }
+
+            if (isGreen)
+            {
+                green = 0xff;
+            }
+
+            if (isBlue)
+            {
+                blue = 0xff;
+            }
         }
 
         *destIndex++ = red;
@@ -263,7 +288,7 @@ main()
     // Setup Dear ImGui style
     //ImGui::StyleColorsDark();
     ImGui::StyleColorsClassic();
-    ImGui::SetColorEditOptions(ImGuiColorEditFlags_Uint8 | ImGuiColorEditFlags_NoAlpha);
+    ImGui::SetColorEditOptions(ImGuiColorEditFlags__OptionsDefault | ImGuiColorEditFlags_NoAlpha);
 
     // Setup Platform/Renderer bindings
     ImGui_ImplSDL2_InitForOpenGL(window, gl_context);
@@ -368,7 +393,7 @@ main()
             }
         }
 
-        ImGui::SliderFloat("Image scale", &srcScale, 0.1f, 2.0f);
+        ImGui::SliderFloat("Image scale (Viewport only)", &srcScale, 0.1f, 2.0f);
         if (srcID)
         {
             ImGui::Image((void*)(intptr_t)srcID, ImVec2((float) srcWidth * srcScale, (float) srcHeight * srcScale));
@@ -378,7 +403,7 @@ main()
 
         if (showDest)
         {
-            ImGui::Begin("Deep fryed image");
+            ImGui::Begin("Deep fried settings");
 
             ImGui::Text("Filename:");
             ImGui::SameLine();
@@ -389,6 +414,16 @@ main()
             }
 
             bool shouldRedraw = false;
+
+            static float colors[3] = {1, 1, 1};
+            if (ImGui::ColorPicker3("Color points", colors))
+            {
+                shouldRedraw = true;
+                effects.colors = V3(
+                    (u8) (colors[0] * 255), 
+                    (u8) (colors[1] * 255), 
+                    (u8) (colors[2] * 255));
+            }
 
             static float blackColors[3] = {};
             if (ImGui::ColorEdit3("Black point", blackColors))
@@ -410,9 +445,9 @@ main()
                     (u8) (whiteColors[2] * 255));
             }
 
-            shouldRedraw |= ImGui::SliderInt("JPEG Quality", &effects.jpegQuality, 1, 100);
+            shouldRedraw |= ImGui::SliderInt("JPEG Quality (Lower is worse)", &effects.jpegQuality, 1, 100);
 
-            shouldRedraw |= ImGui::SliderFloat("Downsample multiply", &effects.downSampleMultiply, 0.01f, 0.5f);
+            shouldRedraw |= ImGui::SliderFloat("Downsample multiply (Lower is worse)", &effects.downSampleMultiply, 0.01f, 0.5f);
             shouldRedraw |= ImGui::SliderInt("Downsample iterations", &effects.downSampleCount, 0, 100);
             ImGui::SameLine();
             ImGui::Text("(Higher values will be very slow)");
@@ -425,6 +460,10 @@ main()
                 DeleteGLTexture(destID);
                 destID = GenGLTexture(srcWidth, srcHeight, destData);
             }
+
+            ImGui::End();
+
+            ImGui::Begin("Image preview");
 
             ImGui::SliderFloat("Image scale", &destScale, 0.1f, 2.0f);
             ImGui::SameLine();
